@@ -49,7 +49,7 @@
     </style>
 </head>
 <body>
-    <h1>Mockminds WebSocket Client Example</h1>
+    <h1>Pipecat WebSocket Client Example</h1>
     <h3><div id="progressText">Loading, wait...</div></h3>
     <div>
         <button id="startAudioBtn">Start Call</button>
@@ -97,7 +97,7 @@
             }
             Frame = root.lookupType('pipecat.Frame');
             const progressText = document.getElementById('progressText');
-            progressText.textContent = 'We are ready! click `Start Call`.';
+            progressText.textContent = 'We are ready! Make sure to run the server and then click `Start Audio`.';
 
             startBtn.disabled = false;
             stopBtn.disabled = true;
