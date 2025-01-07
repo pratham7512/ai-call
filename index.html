@@ -1,241 +1,385 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
-  <title>Mockminds WebSocket Client Example</title>
-  <style>
-    body {
-      background-color: #000;
-      color: #fff;
-      font-family: 'Courier New', monospace;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      margin: 0;
-      padding: 20px;
-      box-sizing: border-box;
-    }
-    h1, h3 {
-      text-align: center;
-      font-weight: normal;
-    }
-    button {
-      border: none;
-      padding: 10px 20px;
-      margin: 10px;
-      font-family: 'Courier New', monospace;
-      font-size: 16px;
-      cursor: pointer;
-      color: #fff;
-    }
-    #startAudioBtn {
-      background-color: #008000;
-    }
-    #stopAudioBtn {
-      background-color: #ff0000;
-      display: none;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    #progressText {
-      margin-bottom: 20px;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
+    <title>Pipecat WebSocket Client Example</title>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1, h3 {
+            text-align: center;
+            font-weight: normal;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            border: none;
+            padding: 10px 20px;
+            margin: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            cursor: pointer;
+            color: #fff;
+            transition: opacity 0.3s ease;
+        }
+        #startAudioBtn {
+            background-color: #008000;
+        }
+        #stopAudioBtn {
+            background-color: #ff0000;
+            display: none;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #progressText {
+            margin-bottom: 20px;
+        }
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #666;
+            margin-left: 10px;
+            display: inline-block;
+        }
+        .status-indicator.active {
+            background-color: #00ff00;
+        }
+        .audio-stats {
+            font-size: 14px;
+            margin-top: 20px;
+            text-align: left;
+        }
+    </style>
 </head>
 <body>
-  <h1>Pipecat WebSocket Client Example</h1>
-  <h3><div id="progressText">Loading, wait...</div></h3>
-  <div>
-    <button id="startAudioBtn">Start Call</button>
-    <button id="stopAudioBtn">End Call</button>
-  </div>
-  <script>
-    const SAMPLE_RATE = 24000;
-    const NUM_CHANNELS = 1;
-    // Increased play time reset threshold to 2.0 seconds to prevent frequent resets.
-    const PLAY_TIME_RESET_THRESHOLD_MS = 2.0;
+    <h1>Pipecat WebSocket Client Example</h1>
+    <h3>
+        <div id="progressText">Loading, please wait...</div>
+        <div class="status-indicator" id="connectionStatus"></div>
+    </h3>
+    <div class="controls">
+        <button id="startAudioBtn">Start Call</button>
+        <button id="stopAudioBtn">End Call</button>
+    </div>
+    <div class="audio-stats" id="audioStats"></div>
 
-    let Frame = null;
-    let ws = null;
+    <script>
+        // Constants
+        const SAMPLE_RATE = 24000;
+        const NUM_CHANNELS = 1;
+        const BUFFER_SIZE = 2048;
+        const MAX_BUFFER_SIZE = 10;
+        const PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
 
-    // The audio context
-    let audioContext = null;
-    // The audio context media stream source
-    let source = null;
-    // The microphone stream from getUserMedia
-    let microphoneStream = null;
-    // Script processor to get data from microphone
-    let scriptProcessor = null;
-    // AudioContext play time
-    let playTime = 0;
-    // Last time we received a websocket message
-    let lastMessageTime = 0;
-    // Whether we should be playing audio
-    let isPlaying = false;
+        // State variables
+        let Frame = null;
+        let ws = null;
+        let audioContext = null;
+        let source = null;
+        let microphoneStream = null;
+        let scriptProcessor = null;
+        let playTime = 0;
+        let lastMessageTime = 0;
+        let isPlaying = false;
+        let audioQueue = [];
+        let statsInterval = null;
 
-    let startBtn = document.getElementById('startAudioBtn');
-    let stopBtn = document.getElementById('stopAudioBtn');
+        // DOM elements
+        const startBtn = document.getElementById('startAudioBtn');
+        const stopBtn = document.getElementById('stopAudioBtn');
+        const progressText = document.getElementById('progressText');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const audioStats = document.getElementById('audioStats');
 
-    // Load the protobuf frames
-    const proto = protobuf.load('frames.proto', (err, root) => {
-      if (err) {
-        throw err;
-      }
-      Frame = root.lookupType('pipecat.Frame');
-      const progressText = document.getElementById('progressText');
-      progressText.textContent = 'We are ready! Make sure to run the server and then click `Start Audio`.';
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-    });
-
-    function initWebSocket() {
-      ws = new WebSocket('wss://pipecat-eg.onrender.com');
-      // This ensures event.data is always an ArrayBuffer
-      ws.binaryType = 'arraybuffer';
-
-      ws.addEventListener('open', handleWebSocketOpen);
-      ws.addEventListener('message', handleWebSocketMessage);
-      ws.addEventListener('close', (event) => {
-        console.log('WebSocket connection closed.', event.code, event.reason);
-        stopAudio(false);
-      });
-      ws.addEventListener('error', (event) => console.error('WebSocket error:', event));
-    }
-
-    function handleWebSocketOpen(event) {
-      console.log('WebSocket connection established.', event);
-      navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: SAMPLE_RATE,
-          channelCount: NUM_CHANNELS,
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true,
-        }
-      }).then((stream) => {
-        microphoneStream = stream;
-        // Increase buffer size to 8192 for smoother audio capture
-        scriptProcessor = audioContext.createScriptProcessor(8192, 1, 1);
-        source = audioContext.createMediaStreamSource(stream);
-        source.connect(scriptProcessor);
-        scriptProcessor.connect(audioContext.destination);
-
-        scriptProcessor.onaudioprocess = (event) => {
-          if (!ws) {
-            return;
-          }
-          const audioData = event.inputBuffer.getChannelData(0);
-          const pcmS16Array = convertFloat32ToS16PCM(audioData);
-          const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-
-          const frame = Frame.create({
-            audio: {
-              audio: Array.from(pcmByteArray),
-              sampleRate: SAMPLE_RATE,
-              numChannels: NUM_CHANNELS
+        // Initialize Protobuf
+        protobuf.load('frames.proto', (err, root) => {
+            if (err) {
+                progressText.textContent = 'Error loading protocol buffer definition';
+                console.error(err);
+                return;
             }
-          });
-          const encodedFrame = new Uint8Array(Frame.encode(frame).finish());
-          ws.send(encodedFrame);
-        };
-      }).catch((error) => console.error('Error accessing microphone:', error));
-    }
+            Frame = root.lookupType('pipecat.Frame');
+            progressText.textContent = 'Ready to start. Click "Start Call" to begin.';
+            startBtn.disabled = false;
+        });
 
-    function handleWebSocketMessage(event) {
-      const arrayBuffer = event.data;
-      if (isPlaying) {
-        enqueueAudioFromProto(arrayBuffer);
-      }
-    }
+        // Audio Context initialization
+        async function initAudioContext() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                latencyHint: 'interactive',
+                sampleRate: SAMPLE_RATE
+            });
 
-    function enqueueAudioFromProto(arrayBuffer) {
-      const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
-      if (!parsedFrame?.audio) {
-        return false;
-      }
-      // Reset play time if it's been a while since we played anything
-      const diffTime = audioContext.currentTime - lastMessageTime;
-      if ((playTime === 0) || (diffTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
-        playTime = audioContext.currentTime;
-      }
-      lastMessageTime = audioContext.currentTime;
+            try {
+                await audioContext.audioWorklet.addModule('audioProcessor.js');
+                return true;
+            } catch (err) {
+                console.warn('AudioWorklet not supported, falling back to ScriptProcessor:', err);
+                return false;
+            }
+        }
 
-      // Convert the extracted bytes into usable audio data
-      const audioVector = Array.from(parsedFrame.audio.audio);
-      const audioArray = new Uint8Array(audioVector);
+        // WebSocket handling
+        function initWebSocket() {
+            ws = new WebSocket('wss://pipecat-eg.onrender.com');
+            ws.binaryType = 'arraybuffer';
 
-      audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
-        const source = new AudioBufferSourceNode(audioContext);
-        source.buffer = buffer;
-        source.start(playTime);
-        source.connect(audioContext.destination);
-        playTime += buffer.duration;
-      });
-    }
+            ws.addEventListener('open', handleWebSocketOpen);
+            ws.addEventListener('message', handleWebSocketMessage);
+            ws.addEventListener('close', handleWebSocketClose);
+            ws.addEventListener('error', handleWebSocketError);
+        }
 
-    function convertFloat32ToS16PCM(float32Array) {
-      let int16Array = new Int16Array(float32Array.length);
-      for (let i = 0; i < float32Array.length; i++) {
-        let clampedValue = Math.max(-1, Math.min(1, float32Array[i]));
-        // Convert float [-1, 1] to 16-bit PCM
-        int16Array[i] = clampedValue < 0
-          ? clampedValue * 32768
-          : clampedValue * 32767;
-      }
-      return int16Array;
-    }
+        function handleWebSocketOpen(event) {
+            console.log('WebSocket connected');
+            connectionStatus.classList.add('active');
+            initializeAudioStream();
+        }
 
-    function startAudioBtnHandler() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert('getUserMedia is not supported in your browser.');
-        return;
-      }
-      startBtn.style.display = 'none';
-      stopBtn.style.display = 'inline-block';
+        function handleWebSocketClose(event) {
+            console.log('WebSocket closed:', event.code, event.reason);
+            connectionStatus.classList.remove('active');
+            stopAudio(false);
+        }
 
-      // Use a more balanced latency hint to reduce choppiness
-      audioContext = new (window.AudioContext || window.webkitAudioContext)({
-        latencyHint: 'balanced',
-        sampleRate: SAMPLE_RATE
-      });
+        function handleWebSocketError(event) {
+            console.error('WebSocket error:', event);
+            progressText.textContent = 'Connection error occurred';
+        }
 
-      isPlaying = true;
-      initWebSocket();
-    }
+        function handleWebSocketMessage(event) {
+            if (isPlaying) {
+                queueAudioFromProto(event.data);
+            }
+        }
 
-    function stopAudio(closeWebsocket) {
-      playTime = 0;
-      isPlaying = false;
-      startBtn.style.display = 'inline-block';
-      stopBtn.style.display = 'none';
+        // Audio stream initialization
+        async function initializeAudioStream() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: SAMPLE_RATE,
+                        channelCount: NUM_CHANNELS,
+                        autoGainControl: true,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        latency: 0.003
+                    }
+                });
 
-      if (ws && closeWebsocket) {
-        ws.close();
-        ws = null;
-      }
-      if (scriptProcessor) {
-        scriptProcessor.disconnect();
-      }
-      if (source) {
-        source.disconnect();
-      }
-    }
+                microphoneStream = stream;
+                source = audioContext.createMediaStreamSource(stream);
 
-    function stopAudioBtnHandler() {
-      stopAudio(true);
-    }
+                const useWorklet = await initAudioContext();
+                if (useWorklet) {
+                    setupAudioWorklet();
+                } else {
+                    setupScriptProcessor();
+                }
 
-    startBtn.addEventListener('click', startAudioBtnHandler);
-    stopBtn.addEventListener('click', stopAudioBtnHandler);
+                startAudioStats();
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                progressText.textContent = 'Error accessing microphone';
+                stopAudio(true);
+            }
+        }
 
-    startBtn.disabled = true;
-    stopBtn.disabled = true;
-  </script>
+        // Audio processing setup
+        function setupAudioWorklet() {
+            const workletNode = new AudioWorkletNode(audioContext, 'audio-processor', {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                processorOptions: {
+                    bufferSize: BUFFER_SIZE
+                }
+            });
+
+            source.connect(workletNode);
+            workletNode.connect(audioContext.destination);
+            workletNode.port.onmessage = (event) => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    sendAudioData(event.data);
+                }
+            };
+        }
+
+        function setupScriptProcessor() {
+            scriptProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+
+            scriptProcessor.onaudioprocess = (event) => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    sendAudioData(event.inputBuffer.getChannelData(0));
+                }
+            };
+        }
+
+        // Audio data handling
+        function sendAudioData(audioData) {
+            const pcmS16Array = convertFloat32ToS16PCM(audioData);
+            const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
+            const frame = Frame.create({
+                audio: {
+                    audio: Array.from(pcmByteArray),
+                    sampleRate: SAMPLE_RATE,
+                    numChannels: NUM_CHANNELS
+                }
+            });
+            const encodedFrame = Frame.encode(frame).finish();
+            ws.send(encodedFrame);
+        }
+
+        function queueAudioFromProto(arrayBuffer) {
+            try {
+                const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
+                if (!parsedFrame?.audio) return;
+
+                const audioVector = Array.from(parsedFrame.audio.audio);
+                const audioArray = new Uint8Array(audioVector);
+
+                audioQueue.push(audioArray.buffer);
+                if (audioQueue.length > MAX_BUFFER_SIZE) {
+                    audioQueue.shift();
+                }
+
+                if (audioQueue.length >= 2 && !playTime) {
+                    playNextInQueue();
+                }
+            } catch (error) {
+                console.error('Error processing audio frame:', error);
+            }
+        }
+
+        function playNextInQueue() {
+            if (!audioQueue.length || !isPlaying) return;
+
+            const buffer = audioQueue.shift();
+            audioContext.decodeAudioData(buffer)
+                .then(decodedBuffer => {
+                    const source = audioContext.createBufferSource();
+                    source.buffer = decodedBuffer;
+
+                    if (!playTime || (audioContext.currentTime - lastMessageTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
+                        playTime = audioContext.currentTime;
+                    }
+
+                    source.start(playTime);
+                    source.connect(audioContext.destination);
+                    playTime += decodedBuffer.duration;
+                    lastMessageTime = audioContext.currentTime;
+                    source.onended = playNextInQueue;
+                })
+                .catch(error => {
+                    console.error('Error decoding audio data:', error);
+                });
+        }
+
+        // Utility functions
+        function convertFloat32ToS16PCM(float32Array) {
+            const int16Array = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32Array[i]));
+                int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return int16Array;
+        }
+
+        function updateAudioStats() {
+            if (!isPlaying) return;
+            
+            audioStats.textContent = `
+                Buffer Size: ${audioQueue.length}/${MAX_BUFFER_SIZE}
+                Latency: ${(audioContext?.baseLatency || 0).toFixed(3)}s
+                Sample Rate: ${SAMPLE_RATE}Hz
+                Current Time: ${audioContext?.currentTime.toFixed(2)}s
+            `;
+        }
+
+        function startAudioStats() {
+            statsInterval = setInterval(updateAudioStats, 1000);
+        }
+
+        // Button handlers
+        async function startAudioBtnHandler() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert('Audio input is not supported in your browser.');
+                return;
+            }
+
+            startBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
+            stopBtn.disabled = false;
+            isPlaying = true;
+
+            await initAudioContext();
+            initWebSocket();
+        }
+
+        function stopAudio(closeWebsocket) {
+            isPlaying = false;
+            playTime = 0;
+            audioQueue = [];
+
+            if (closeWebsocket && ws) {
+                ws.close();
+                ws = null;
+            }
+
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+
+            if (source) {
+                source.disconnect();
+                source = null;
+            }
+
+            if (microphoneStream) {
+                microphoneStream.getTracks().forEach(track => track.stop());
+                microphoneStream = null;
+            }
+
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
+            audioStats.textContent = '';
+        }
+
+        function stopAudioBtnHandler() {
+            stopAudio(true);
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', startAudioBtnHandler);
+        stopBtn.addEventListener('click', stopAudioBtnHandler);
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+    </script>
 </body>
 </html>
