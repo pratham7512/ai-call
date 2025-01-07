@@ -1,16 +1,60 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Pipecat WebSocket Client Example</title>
-  </head>
-
-  <body>
-    <h1>Pipecat WebSocket Client Example</h1>
-    <button id="startAudioBtn">Start Audio</button>
-    <button id="stopAudioBtn" disabled>Stop Audio</button>
-    <div id="status">Status: Not started</div>
-
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
+    <title>Mockminds WebSocket Client Example</title>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1, h3 {
+            text-align: center;
+            font-weight: normal;
+        }
+        button {
+            border: none;
+            padding: 10px 20px;
+            margin: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            cursor: pointer;
+            color: #fff;
+        }
+        #startAudioBtn {
+            background-color: #008000;
+        }
+        #stopAudioBtn {
+            background-color: #ff0000;
+            display: none;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #progressText {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Mockminds AI call</h1>
+    <h3><div id="progressText">Loading, wait...</div></h3>
+    <div>
+        <button id="startAudioBtn">Start Call</button>
+        <button id="stopAudioBtn">End Call</button>
+    </div>
     <script>
       // [1] Use MediaRecorder with a timeSlice to capture short,
       // continuous audio chunks and send them via WebSocket.
