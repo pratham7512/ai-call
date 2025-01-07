@@ -201,10 +201,24 @@
             }
         }
 
-        // Audio processing functions
+        // Add these debug functions right after your state variables
+
+        function logAudioDebug(message, data = null) {
+            const timestamp = new Date().toISOString();
+            const debugMessage = `[${timestamp}] ${message}`;
+            console.log(debugMessage, data || '');
+            
+            // Update UI with debug info
+            const statsDiv = document.getElementById('audioStats');
+            statsDiv.innerHTML = `${debugMessage}<br>${statsDiv.innerHTML}`;
+        }
+
+        // Add these debug points in your existing functions
+
         async function setupAudioWorklet() {
             if (workletNode) {
                 workletNode.disconnect();
+                logAudioDebug('Disconnected previous worklet');
             }
 
             workletNode = new AudioWorkletNode(audioContext, 'audio-processor', {
@@ -217,58 +231,70 @@
 
             source.connect(workletNode);
             workletNode.connect(audioContext.destination);
+            logAudioDebug('Audio worklet setup complete');
             
             workletNode.port.onmessage = (event) => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
+                    logAudioDebug('Sending audio data, length:', event.data.length);
                     sendAudioData(event.data);
                 }
             };
-        }
 
-        function setupScriptProcessor() {
-            scriptProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
-
-            scriptProcessor.onaudioprocess = (event) => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    sendAudioData(event.inputBuffer.getChannelData(0));
-                }
+            // Add error handling for the worklet
+            workletNode.onprocessorerror = (err) => {
+                logAudioDebug('AudioWorklet processing error:', err);
             };
         }
 
         function sendAudioData(audioData) {
-            const pcmS16Array = convertFloat32ToS16PCM(audioData);
-            const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-            const frame = Frame.create({
-                audio: {
-                    audio: Array.from(pcmByteArray),
-                    sampleRate: SAMPLE_RATE,
-                    numChannels: NUM_CHANNELS
-                }
-            });
-            const encodedFrame = Frame.encode(frame).finish();
-            ws.send(encodedFrame);
+            try {
+                const pcmS16Array = convertFloat32ToS16PCM(audioData);
+                const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
+                const frame = Frame.create({
+                    audio: {
+                        audio: Array.from(pcmByteArray),
+                        sampleRate: SAMPLE_RATE,
+                        numChannels: NUM_CHANNELS
+                    }
+                });
+                const encodedFrame = Frame.encode(frame).finish();
+                logAudioDebug('Sending frame, size:', encodedFrame.length);
+                ws.send(encodedFrame);
+            } catch (error) {
+                logAudioDebug('Error sending audio data:', error);
+            }
+        }
+
+        function handleWebSocketMessage(event) {
+            logAudioDebug('Received WebSocket message, size:', event.data.byteLength);
+            if (isPlaying) {
+                queueAudioFromProto(event.data);
+            }
         }
 
         function queueAudioFromProto(arrayBuffer) {
             try {
                 const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
+                logAudioDebug('Decoded proto frame:', parsedFrame?.audio ? 'success' : 'failed');
+                
                 if (!parsedFrame?.audio) return;
 
                 const audioVector = Array.from(parsedFrame.audio.audio);
                 const audioArray = new Uint8Array(audioVector);
+                logAudioDebug('Audio data received, size:', audioArray.length);
 
                 audioQueue.push(audioArray.buffer);
                 if (audioQueue.length > MAX_BUFFER_SIZE) {
                     audioQueue.shift();
+                    logAudioDebug('Queue overflow, dropped oldest frame');
                 }
 
                 if (audioQueue.length >= 2 && !playTime) {
+                    logAudioDebug('Starting playback');
                     playNextInQueue();
                 }
             } catch (error) {
-                console.error('Error processing audio frame:', error);
+                logAudioDebug('Error processing audio frame:', error);
             }
         }
 
