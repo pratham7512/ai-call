@@ -69,6 +69,12 @@
         // The audio context
         let audioContext = null;
 
+        // Audio buffer queue and scheduling
+        let audioQueue = [];
+        const BUFFER_THRESHOLD = 5; // Number of chunks to buffer before starting playback
+        let isBuffering = false;
+        let scheduledTime = 0;
+        
         // The audio context media stream source
         let source = null;
 
@@ -87,9 +93,6 @@
 
         // Whether we should be playing audio.
         let isPlaying = false;
-
-        // Add a buffer queue for audio data
-        let audioBufferQueue = [];
 
         let startBtn = document.getElementById('startAudioBtn');
         let stopBtn = document.getElementById('stopAudioBtn');
@@ -163,11 +166,11 @@
         function handleWebSocketMessage(event) {
             const arrayBuffer = event.data;
             if (isPlaying) {
-                enqueueAudioFromProto(arrayBuffer);
+                processAudioMessage(arrayBuffer);
             }
         }
 
-        function enqueueAudioFromProto(arrayBuffer) {
+        function processAudioMessage(arrayBuffer) {
             const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
             if (!parsedFrame?.audio) {
                 return false;
@@ -177,23 +180,39 @@
             const audioArray = new Uint8Array(audioVector);
 
             audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
-                audioBufferQueue.push(buffer);
-                playBufferedAudio();
+                audioQueue.push(buffer);
+                
+                if (!isBuffering && audioQueue.length >= BUFFER_THRESHOLD) {
+                    isBuffering = false;
+                    playFromBuffer();
+                } else if (audioQueue.length < BUFFER_THRESHOLD) {
+                    isBuffering = true;
+                    const progressText = document.getElementById('progressText');
+                    progressText.textContent = `Buffering... ${Math.round((audioQueue.length / BUFFER_THRESHOLD) * 100)}%`;
+                }
             });
         }
 
-        function playBufferedAudio() {
-            if (audioBufferQueue.length > 0 && isPlaying) {
-                const buffer = audioBufferQueue.shift();
+        function playFromBuffer() {
+            if (!isPlaying || audioQueue.length === 0) return;
+
+            const currentTime = audioContext.currentTime;
+            
+            if (scheduledTime < currentTime) {
+                scheduledTime = currentTime;
+            }
+
+            while (audioQueue.length > 0 && scheduledTime - currentTime < 2) { // Schedule up to 2 seconds ahead
+                const buffer = audioQueue.shift();
                 const source = new AudioBufferSourceNode(audioContext);
                 source.buffer = buffer;
                 source.connect(audioContext.destination);
-                source.start(playTime);
-                playTime += buffer.duration;
-
-                // Schedule the next buffer to play after the current one
-                source.onended = playBufferedAudio;
+                source.start(scheduledTime);
+                scheduledTime += buffer.duration;
             }
+
+            // Schedule next check
+            setTimeout(() => playFromBuffer(), 100);
         }
 
         function convertFloat32ToS16PCM(float32Array) {
@@ -221,6 +240,11 @@
             });
 
             isPlaying = true;
+            isBuffering = true;
+            audioQueue = [];
+            scheduledTime = 0;
+            const progressText = document.getElementById('progressText');
+            progressText.textContent = 'Buffering...';
 
             initWebSocket();
         }
@@ -228,6 +252,9 @@
         function stopAudio(closeWebsocket) {
             playTime = 0;
             isPlaying = false;
+            isBuffering = false;
+            audioQueue = [];
+            scheduledTime = 0;
             startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
 
