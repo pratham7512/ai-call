@@ -49,7 +49,7 @@
     </style>
 </head>
 <body>
-    <h1>Pipecat WebSocket Client Example</h1>
+    <h1>Mockminds WebSocket Client Example</h1>
     <h3><div id="progressText">Loading, wait...</div></h3>
     <div>
         <button id="startAudioBtn">Start Call</button>
@@ -69,12 +69,6 @@
         // The audio context
         let audioContext = null;
 
-        // Audio buffer queue and scheduling
-        let audioQueue = [];
-        const BUFFER_THRESHOLD = 5; // Number of chunks to buffer before starting playback
-        let isBuffering = false;
-        let scheduledTime = 0;
-        
         // The audio context media stream source
         let source = null;
 
@@ -103,7 +97,7 @@
             }
             Frame = root.lookupType('pipecat.Frame');
             const progressText = document.getElementById('progressText');
-            progressText.textContent = 'We are ready! Make sure to run the server and then click `Start Audio`.';
+            progressText.textContent = 'We are ready! click `Start Call`.';
 
             startBtn.disabled = false;
             stopBtn.disabled = true;
@@ -166,53 +160,35 @@
         function handleWebSocketMessage(event) {
             const arrayBuffer = event.data;
             if (isPlaying) {
-                processAudioMessage(arrayBuffer);
+                enqueueAudioFromProto(arrayBuffer);
             }
         }
 
-        function processAudioMessage(arrayBuffer) {
+        function enqueueAudioFromProto(arrayBuffer) {
             const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
             if (!parsedFrame?.audio) {
                 return false;
             }
 
+            // Reset play time if it's been a while we haven't played anything.
+            const diffTime = audioContext.currentTime - lastMessageTime;
+            if ((playTime == 0) || (diffTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
+                playTime = audioContext.currentTime;
+            }
+            lastMessageTime = audioContext.currentTime;
+
+            // We should be able to use parsedFrame.audio.audio.buffer but for
+            // some reason that contains all the bytes from the protobuf message.
             const audioVector = Array.from(parsedFrame.audio.audio);
             const audioArray = new Uint8Array(audioVector);
 
             audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
-                audioQueue.push(buffer);
-                
-                if (!isBuffering && audioQueue.length >= BUFFER_THRESHOLD) {
-                    isBuffering = false;
-                    playFromBuffer();
-                } else if (audioQueue.length < BUFFER_THRESHOLD) {
-                    isBuffering = true;
-                    const progressText = document.getElementById('progressText');
-                    progressText.textContent = `Buffering... ${Math.round((audioQueue.length / BUFFER_THRESHOLD) * 100)}%`;
-                }
-            });
-        }
-
-        function playFromBuffer() {
-            if (!isPlaying || audioQueue.length === 0) return;
-
-            const currentTime = audioContext.currentTime;
-            
-            if (scheduledTime < currentTime) {
-                scheduledTime = currentTime;
-            }
-
-            while (audioQueue.length > 0 && scheduledTime - currentTime < 2) { // Schedule up to 2 seconds ahead
-                const buffer = audioQueue.shift();
                 const source = new AudioBufferSourceNode(audioContext);
                 source.buffer = buffer;
+                source.start(playTime);
                 source.connect(audioContext.destination);
-                source.start(scheduledTime);
-                scheduledTime += buffer.duration;
-            }
-
-            // Schedule next check
-            setTimeout(() => playFromBuffer(), 100);
+                playTime = playTime + buffer.duration;
+            });
         }
 
         function convertFloat32ToS16PCM(float32Array) {
@@ -240,11 +216,6 @@
             });
 
             isPlaying = true;
-            isBuffering = true;
-            audioQueue = [];
-            scheduledTime = 0;
-            const progressText = document.getElementById('progressText');
-            progressText.textContent = 'Buffering...';
 
             initWebSocket();
         }
@@ -252,9 +223,6 @@
         function stopAudio(closeWebsocket) {
             playTime = 0;
             isPlaying = false;
-            isBuffering = false;
-            audioQueue = [];
-            scheduledTime = 0;
             startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
 
