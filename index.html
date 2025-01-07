@@ -23,11 +23,6 @@
             text-align: center;
             font-weight: normal;
         }
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-        }
         button {
             border: none;
             padding: 10px 20px;
@@ -36,7 +31,6 @@
             font-size: 16px;
             cursor: pointer;
             color: #fff;
-            transition: opacity 0.3s ease;
         }
         #startAudioBtn {
             background-color: #008000;
@@ -123,7 +117,41 @@
             startBtn.disabled = false;
         });
 
-        // Initialize audio context only once
+        // WebSocket functions
+        function initWebSocket() {
+            ws = new WebSocket('wss://pipecat-eg.onrender.com');
+            ws.binaryType = 'arraybuffer';
+
+            ws.addEventListener('open', handleWebSocketOpen);
+            ws.addEventListener('message', handleWebSocketMessage);
+            ws.addEventListener('close', handleWebSocketClose);
+            ws.addEventListener('error', handleWebSocketError);
+        }
+
+        function handleWebSocketOpen(event) {
+            console.log('WebSocket connected');
+            connectionStatus.classList.add('active');
+            initializeAudioStream();
+        }
+
+        function handleWebSocketClose(event) {
+            console.log('WebSocket closed:', event.code, event.reason);
+            connectionStatus.classList.remove('active');
+            stopAudio(false);
+        }
+
+        function handleWebSocketError(event) {
+            console.error('WebSocket error:', event);
+            progressText.textContent = 'Connection error occurred';
+        }
+
+        function handleWebSocketMessage(event) {
+            if (isPlaying) {
+                queueAudioFromProto(event.data);
+            }
+        }
+
+        // Audio initialization functions
         async function initializeAudio() {
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -138,7 +166,6 @@
                 }
             }
 
-            // Resume context if it's suspended
             if (audioContext.state === 'suspended') {
                 await audioContext.resume();
             }
@@ -174,6 +201,7 @@
             }
         }
 
+        // Audio processing functions
         async function setupAudioWorklet() {
             if (workletNode) {
                 workletNode.disconnect();
@@ -197,9 +225,103 @@
             };
         }
 
-        // ... rest of the previous code remains the same ...
+        function setupScriptProcessor() {
+            scriptProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
 
-        // Update start button handler
+            scriptProcessor.onaudioprocess = (event) => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    sendAudioData(event.inputBuffer.getChannelData(0));
+                }
+            };
+        }
+
+        function sendAudioData(audioData) {
+            const pcmS16Array = convertFloat32ToS16PCM(audioData);
+            const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
+            const frame = Frame.create({
+                audio: {
+                    audio: Array.from(pcmByteArray),
+                    sampleRate: SAMPLE_RATE,
+                    numChannels: NUM_CHANNELS
+                }
+            });
+            const encodedFrame = Frame.encode(frame).finish();
+            ws.send(encodedFrame);
+        }
+
+        function queueAudioFromProto(arrayBuffer) {
+            try {
+                const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
+                if (!parsedFrame?.audio) return;
+
+                const audioVector = Array.from(parsedFrame.audio.audio);
+                const audioArray = new Uint8Array(audioVector);
+
+                audioQueue.push(audioArray.buffer);
+                if (audioQueue.length > MAX_BUFFER_SIZE) {
+                    audioQueue.shift();
+                }
+
+                if (audioQueue.length >= 2 && !playTime) {
+                    playNextInQueue();
+                }
+            } catch (error) {
+                console.error('Error processing audio frame:', error);
+            }
+        }
+
+        function playNextInQueue() {
+            if (!audioQueue.length || !isPlaying) return;
+
+            const buffer = audioQueue.shift();
+            audioContext.decodeAudioData(buffer)
+                .then(decodedBuffer => {
+                    const source = audioContext.createBufferSource();
+                    source.buffer = decodedBuffer;
+
+                    if (!playTime || (audioContext.currentTime - lastMessageTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
+                        playTime = audioContext.currentTime;
+                    }
+
+                    source.start(playTime);
+                    source.connect(audioContext.destination);
+                    playTime += decodedBuffer.duration;
+                    lastMessageTime = audioContext.currentTime;
+                    source.onended = playNextInQueue;
+                })
+                .catch(error => {
+                    console.error('Error decoding audio data:', error);
+                });
+        }
+
+        // Utility functions
+        function convertFloat32ToS16PCM(float32Array) {
+            const int16Array = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32Array[i]));
+                int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return int16Array;
+        }
+
+        function updateAudioStats() {
+            if (!isPlaying) return;
+            
+            audioStats.textContent = `
+                Buffer Size: ${audioQueue.length}/${MAX_BUFFER_SIZE}
+                Latency: ${(audioContext?.baseLatency || 0).toFixed(3)}s
+                Sample Rate: ${SAMPLE_RATE}Hz
+                Current Time: ${audioContext?.currentTime.toFixed(2)}s
+            `;
+        }
+
+        function startAudioStats() {
+            statsInterval = setInterval(updateAudioStats, 1000);
+        }
+
+        // Button handlers
         async function startAudioBtnHandler() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 alert('Audio input is not supported in your browser.');
@@ -220,7 +342,6 @@
             }
         }
 
-        // Update stop audio function
         function stopAudio(closeWebsocket) {
             isPlaying = false;
             playTime = 0;
@@ -259,6 +380,10 @@
             startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
             audioStats.textContent = '';
+        }
+
+        function stopAudioBtnHandler() {
+            stopAudio(true);
         }
 
         // Event listeners
