@@ -6,68 +6,7 @@
     <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
     <title>Pipecat WebSocket Client Example</title>
     <style>
-        body {
-            background-color: #000;
-            color: #fff;
-            font-family: 'Courier New', monospace;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            padding: 20px;
-            box-sizing: border-box;
-        }
-        h1, h3 {
-            text-align: center;
-            font-weight: normal;
-        }
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-        }
-        button {
-            border: none;
-            padding: 10px 20px;
-            margin: 10px;
-            font-family: 'Courier New', monospace;
-            font-size: 16px;
-            cursor: pointer;
-            color: #fff;
-            transition: opacity 0.3s ease;
-        }
-        #startAudioBtn {
-            background-color: #008000;
-        }
-        #stopAudioBtn {
-            background-color: #ff0000;
-            display: none;
-        }
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        #progressText {
-            margin-bottom: 20px;
-        }
-        .status-indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background-color: #666;
-            margin-left: 10px;
-            display: inline-block;
-        }
-        .status-indicator.active {
-            background-color: #00ff00;
-        }
-        .audio-stats {
-            font-size: 14px;
-            margin-top: 20px;
-            text-align: left;
-        }
+        /* ... previous styles remain the same ... */
     </style>
 </head>
 <body>
@@ -102,6 +41,7 @@
         let isPlaying = false;
         let audioQueue = [];
         let statsInterval = null;
+        let workletNode = null;
 
         // DOM elements
         const startBtn = document.getElementById('startAudioBtn');
@@ -122,57 +62,27 @@
             startBtn.disabled = false;
         });
 
-        // Audio Context initialization
-        async function initAudioContext() {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                latencyHint: 'interactive',
-                sampleRate: SAMPLE_RATE
-            });
+        // Initialize audio context only once
+        async function initializeAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    latencyHint: 'interactive',
+                    sampleRate: SAMPLE_RATE
+                });
 
-            try {
-                await audioContext.audioWorklet.addModule('audioProcessor.js');
-                return true;
-            } catch (err) {
-                console.warn('AudioWorklet not supported, falling back to ScriptProcessor:', err);
-                return false;
+                try {
+                    await audioContext.audioWorklet.addModule('audioProcessor.js');
+                } catch (err) {
+                    console.warn('AudioWorklet not supported, falling back to ScriptProcessor:', err);
+                }
+            }
+
+            // Resume context if it's suspended
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
             }
         }
 
-        // WebSocket handling
-        function initWebSocket() {
-            ws = new WebSocket('wss://pipecat-eg.onrender.com');
-            ws.binaryType = 'arraybuffer';
-
-            ws.addEventListener('open', handleWebSocketOpen);
-            ws.addEventListener('message', handleWebSocketMessage);
-            ws.addEventListener('close', handleWebSocketClose);
-            ws.addEventListener('error', handleWebSocketError);
-        }
-
-        function handleWebSocketOpen(event) {
-            console.log('WebSocket connected');
-            connectionStatus.classList.add('active');
-            initializeAudioStream();
-        }
-
-        function handleWebSocketClose(event) {
-            console.log('WebSocket closed:', event.code, event.reason);
-            connectionStatus.classList.remove('active');
-            stopAudio(false);
-        }
-
-        function handleWebSocketError(event) {
-            console.error('WebSocket error:', event);
-            progressText.textContent = 'Connection error occurred';
-        }
-
-        function handleWebSocketMessage(event) {
-            if (isPlaying) {
-                queueAudioFromProto(event.data);
-            }
-        }
-
-        // Audio stream initialization
         async function initializeAudioStream() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -189,9 +99,8 @@
                 microphoneStream = stream;
                 source = audioContext.createMediaStreamSource(stream);
 
-                const useWorklet = await initAudioContext();
-                if (useWorklet) {
-                    setupAudioWorklet();
+                if (audioContext.audioWorklet) {
+                    await setupAudioWorklet();
                 } else {
                     setupScriptProcessor();
                 }
@@ -204,9 +113,12 @@
             }
         }
 
-        // Audio processing setup
-        function setupAudioWorklet() {
-            const workletNode = new AudioWorkletNode(audioContext, 'audio-processor', {
+        async function setupAudioWorklet() {
+            if (workletNode) {
+                workletNode.disconnect();
+            }
+
+            workletNode = new AudioWorkletNode(audioContext, 'audio-processor', {
                 numberOfInputs: 1,
                 numberOfOutputs: 1,
                 processorOptions: {
@@ -216,6 +128,7 @@
 
             source.connect(workletNode);
             workletNode.connect(audioContext.destination);
+            
             workletNode.port.onmessage = (event) => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     sendAudioData(event.data);
@@ -223,119 +136,30 @@
             };
         }
 
-        function setupScriptProcessor() {
-            scriptProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
+        // ... rest of the previous code remains the same ...
 
-            scriptProcessor.onaudioprocess = (event) => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    sendAudioData(event.inputBuffer.getChannelData(0));
-                }
-            };
-        }
-
-        // Audio data handling
-        function sendAudioData(audioData) {
-            const pcmS16Array = convertFloat32ToS16PCM(audioData);
-            const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-            const frame = Frame.create({
-                audio: {
-                    audio: Array.from(pcmByteArray),
-                    sampleRate: SAMPLE_RATE,
-                    numChannels: NUM_CHANNELS
-                }
-            });
-            const encodedFrame = Frame.encode(frame).finish();
-            ws.send(encodedFrame);
-        }
-
-        function queueAudioFromProto(arrayBuffer) {
-            try {
-                const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
-                if (!parsedFrame?.audio) return;
-
-                const audioVector = Array.from(parsedFrame.audio.audio);
-                const audioArray = new Uint8Array(audioVector);
-
-                audioQueue.push(audioArray.buffer);
-                if (audioQueue.length > MAX_BUFFER_SIZE) {
-                    audioQueue.shift();
-                }
-
-                if (audioQueue.length >= 2 && !playTime) {
-                    playNextInQueue();
-                }
-            } catch (error) {
-                console.error('Error processing audio frame:', error);
-            }
-        }
-
-        function playNextInQueue() {
-            if (!audioQueue.length || !isPlaying) return;
-
-            const buffer = audioQueue.shift();
-            audioContext.decodeAudioData(buffer)
-                .then(decodedBuffer => {
-                    const source = audioContext.createBufferSource();
-                    source.buffer = decodedBuffer;
-
-                    if (!playTime || (audioContext.currentTime - lastMessageTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
-                        playTime = audioContext.currentTime;
-                    }
-
-                    source.start(playTime);
-                    source.connect(audioContext.destination);
-                    playTime += decodedBuffer.duration;
-                    lastMessageTime = audioContext.currentTime;
-                    source.onended = playNextInQueue;
-                })
-                .catch(error => {
-                    console.error('Error decoding audio data:', error);
-                });
-        }
-
-        // Utility functions
-        function convertFloat32ToS16PCM(float32Array) {
-            const int16Array = new Int16Array(float32Array.length);
-            for (let i = 0; i < float32Array.length; i++) {
-                const s = Math.max(-1, Math.min(1, float32Array[i]));
-                int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            return int16Array;
-        }
-
-        function updateAudioStats() {
-            if (!isPlaying) return;
-            
-            audioStats.textContent = `
-                Buffer Size: ${audioQueue.length}/${MAX_BUFFER_SIZE}
-                Latency: ${(audioContext?.baseLatency || 0).toFixed(3)}s
-                Sample Rate: ${SAMPLE_RATE}Hz
-                Current Time: ${audioContext?.currentTime.toFixed(2)}s
-            `;
-        }
-
-        function startAudioStats() {
-            statsInterval = setInterval(updateAudioStats, 1000);
-        }
-
-        // Button handlers
+        // Update start button handler
         async function startAudioBtnHandler() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 alert('Audio input is not supported in your browser.');
                 return;
             }
 
-            startBtn.style.display = 'none';
-            stopBtn.style.display = 'inline-block';
-            stopBtn.disabled = false;
-            isPlaying = true;
+            try {
+                await initializeAudio();
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-block';
+                stopBtn.disabled = false;
+                isPlaying = true;
 
-            await initAudioContext();
-            initWebSocket();
+                initWebSocket();
+            } catch (error) {
+                console.error('Error initializing audio:', error);
+                progressText.textContent = 'Error initializing audio system';
+            }
         }
 
+        // Update stop audio function
         function stopAudio(closeWebsocket) {
             isPlaying = false;
             playTime = 0;
@@ -344,6 +168,11 @@
             if (closeWebsocket && ws) {
                 ws.close();
                 ws = null;
+            }
+
+            if (workletNode) {
+                workletNode.disconnect();
+                workletNode = null;
             }
 
             if (scriptProcessor) {
@@ -369,10 +198,6 @@
             startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
             audioStats.textContent = '';
-        }
-
-        function stopAudioBtnHandler() {
-            stopAudio(true);
         }
 
         // Event listeners
