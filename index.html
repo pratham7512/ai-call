@@ -58,7 +58,8 @@
     <script>
         const SAMPLE_RATE = 24000;
         const NUM_CHANNELS = 1;
-        const PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
+        const PLAY_TIME_RESET_THRESHOLD_MS = 3.0;
+        const BUFFER_AHEAD_TIME = 0.2; // 200ms ahead buffering
 
         // The protobuf type. We will load it later.
         let Frame = null;
@@ -72,8 +73,7 @@
         // The audio context media stream source
         let source = null;
 
-        // The microphone stream from getUserMedia. SHould be sampled to the
-        // proper sample rate.
+        // The microphone stream from getUserMedia.
         let microphoneStream = null;
 
         // Script processor to get data from microphone.
@@ -87,6 +87,9 @@
 
         // Whether we should be playing audio.
         let isPlaying = false;
+
+        // Audio buffer queue
+        let audioQueue = [];
 
         let startBtn = document.getElementById('startAudioBtn');
         let stopBtn = document.getElementById('stopAudioBtn');
@@ -130,8 +133,8 @@
                 }
             }).then((stream) => {
                 microphoneStream = stream;
-                // 512 is closest thing to 200ms.
-                scriptProcessor = audioContext.createScriptProcessor(512, 1, 1);
+                // Using 8192 buffer size for smoother audio processing
+                scriptProcessor = audioContext.createScriptProcessor(8192, 1, 1);
                 source = audioContext.createMediaStreamSource(stream);
                 source.connect(scriptProcessor);
                 scriptProcessor.connect(audioContext.destination);
@@ -173,21 +176,35 @@
             // Reset play time if it's been a while we haven't played anything.
             const diffTime = audioContext.currentTime - lastMessageTime;
             if ((playTime == 0) || (diffTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
-                playTime = audioContext.currentTime;
+                playTime = audioContext.currentTime + BUFFER_AHEAD_TIME;
+                audioQueue = []; // Clear existing queue on reset
             }
             lastMessageTime = audioContext.currentTime;
 
-            // We should be able to use parsedFrame.audio.audio.buffer but for
-            // some reason that contains all the bytes from the protobuf message.
             const audioVector = Array.from(parsedFrame.audio.audio);
             const audioArray = new Uint8Array(audioVector);
 
             audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
+                if (audioQueue.length > 10) { // Prevent queue from growing too large
+                    audioQueue.shift();
+                }
+                
+                audioQueue.push({
+                    buffer: buffer,
+                    timestamp: playTime
+                });
+
                 const source = new AudioBufferSourceNode(audioContext);
                 source.buffer = buffer;
                 source.start(playTime);
                 source.connect(audioContext.destination);
                 playTime = playTime + buffer.duration;
+
+                // Schedule cleanup of played buffers
+                setTimeout(() => {
+                    const currentTime = audioContext.currentTime;
+                    audioQueue = audioQueue.filter(item => item.timestamp + item.buffer.duration > currentTime);
+                }, buffer.duration * 1000);
             });
         }
 
