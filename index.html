@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
-    <title>Pipecat WebSocket Client Example</title>
+    <title>Mockminds WebSocket Client Example</title>
     <style>
         body {
             background-color: #000;
@@ -46,373 +46,203 @@
         #progressText {
             margin-bottom: 20px;
         }
-        .status-indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background-color: #666;
-            margin-left: 10px;
-            display: inline-block;
-        }
-        .status-indicator.active {
-            background-color: #00ff00;
-        }
-        .audio-stats {
-            font-size: 14px;
-            margin-top: 20px;
-            text-align: left;
-        }
     </style>
 </head>
 <body>
     <h1>Pipecat WebSocket Client Example</h1>
-    <h3>
-        <div id="progressText">Loading, please wait...</div>
-        <div class="status-indicator" id="connectionStatus"></div>
-    </h3>
-    <div class="controls">
+    <h3><div id="progressText">Loading, wait...</div></h3>
+    <div>
         <button id="startAudioBtn">Start Call</button>
         <button id="stopAudioBtn">End Call</button>
     </div>
-    <div class="audio-stats" id="audioStats"></div>
-
     <script>
-        // Constants
         const SAMPLE_RATE = 24000;
         const NUM_CHANNELS = 1;
-        const BUFFER_SIZE = 2048;
-        const MAX_BUFFER_SIZE = 10;
         const PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
 
-        // State variables
+        // The protobuf type. We will load it later.
         let Frame = null;
+
+        // The websocket connection.
         let ws = null;
+
+        // The audio context
         let audioContext = null;
+
+        // The audio context media stream source
         let source = null;
+
+        // The microphone stream from getUserMedia. SHould be sampled to the
+        // proper sample rate.
         let microphoneStream = null;
+
+        // Script processor to get data from microphone.
         let scriptProcessor = null;
+
+        // AudioContext play time.
         let playTime = 0;
+
+        // Last time we received a websocket message.
         let lastMessageTime = 0;
+
+        // Whether we should be playing audio.
         let isPlaying = false;
-        let audioQueue = [];
-        let statsInterval = null;
-        let workletNode = null;
 
-        // DOM elements
-        const startBtn = document.getElementById('startAudioBtn');
-        const stopBtn = document.getElementById('stopAudioBtn');
-        const progressText = document.getElementById('progressText');
-        const connectionStatus = document.getElementById('connectionStatus');
-        const audioStats = document.getElementById('audioStats');
+        let startBtn = document.getElementById('startAudioBtn');
+        let stopBtn = document.getElementById('stopAudioBtn');
 
-        // Initialize Protobuf
-        protobuf.load('frames.proto', (err, root) => {
+        const proto = protobuf.load('frames.proto', (err, root) => {
             if (err) {
-                progressText.textContent = 'Error loading protocol buffer definition';
-                console.error(err);
-                return;
+                throw err;
             }
             Frame = root.lookupType('pipecat.Frame');
-            progressText.textContent = 'Ready to start. Click "Start Call" to begin.';
+            const progressText = document.getElementById('progressText');
+            progressText.textContent = 'We are ready! Make sure to run the server and then click `Start Audio`.';
+
             startBtn.disabled = false;
+            stopBtn.disabled = true;
         });
 
-        // WebSocket functions
         function initWebSocket() {
             ws = new WebSocket('wss://pipecat-eg.onrender.com');
+            // This is so `event.data` is already an ArrayBuffer.
             ws.binaryType = 'arraybuffer';
 
             ws.addEventListener('open', handleWebSocketOpen);
             ws.addEventListener('message', handleWebSocketMessage);
-            ws.addEventListener('close', handleWebSocketClose);
-            ws.addEventListener('error', handleWebSocketError);
+            ws.addEventListener('close', (event) => {
+                console.log('WebSocket connection closed.', event.code, event.reason);
+                stopAudio(false);
+            });
+            ws.addEventListener('error', (event) => console.error('WebSocket error:', event));
         }
 
         function handleWebSocketOpen(event) {
-            console.log('WebSocket connected');
-            connectionStatus.classList.add('active');
-            initializeAudioStream();
-        }
+          console.log('WebSocket connection established.', event)
 
-        function handleWebSocketClose(event) {
-            console.log('WebSocket closed:', event.code, event.reason);
-            connectionStatus.classList.remove('active');
-            stopAudio(false);
-        }
-
-        function handleWebSocketError(event) {
-            console.error('WebSocket error:', event);
-            progressText.textContent = 'Connection error occurred';
-        }
-
-        function handleWebSocketMessage(event) {
-            if (isPlaying) {
-                queueAudioFromProto(event.data);
-            }
-        }
-
-        // Audio initialization functions
-        async function initializeAudio() {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    latencyHint: 'interactive',
-                    sampleRate: SAMPLE_RATE
-                });
-
-                try {
-                    await audioContext.audioWorklet.addModule('audioProcessor.js');
-                } catch (err) {
-                    console.warn('AudioWorklet not supported, falling back to ScriptProcessor:', err);
+          navigator.mediaDevices.getUserMedia({
+                audio: {
+                    sampleRate: SAMPLE_RATE,
+                    channelCount: NUM_CHANNELS,
+                    autoGainControl: true,
+                    echoCancellation: true,
+                    noiseSuppression: true,
                 }
-            }
-
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-        }
-
-        async function initializeAudioStream() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: SAMPLE_RATE,
-                        channelCount: NUM_CHANNELS,
-                        autoGainControl: true,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        latency: 0.003
-                    }
-                });
-
+            }).then((stream) => {
                 microphoneStream = stream;
+                // 512 is closest thing to 200ms.
+                scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
                 source = audioContext.createMediaStreamSource(stream);
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
 
-                if (audioContext.audioWorklet) {
-                    await setupAudioWorklet();
-                } else {
-                    setupScriptProcessor();
-                }
-
-                startAudioStats();
-            } catch (error) {
-                console.error('Error accessing microphone:', error);
-                progressText.textContent = 'Error accessing microphone';
-                stopAudio(true);
-            }
-        }
-
-        // Add these debug functions right after your state variables
-
-        function logAudioDebug(message, data = null) {
-            const timestamp = new Date().toISOString();
-            const debugMessage = `[${timestamp}] ${message}`;
-            console.log(debugMessage, data || '');
-            
-            // Update UI with debug info
-            const statsDiv = document.getElementById('audioStats');
-            statsDiv.innerHTML = `${debugMessage}<br>${statsDiv.innerHTML}`;
-        }
-
-        // Add these debug points in your existing functions
-
-        async function setupAudioWorklet() {
-            if (workletNode) {
-                workletNode.disconnect();
-                logAudioDebug('Disconnected previous worklet');
-            }
-
-            workletNode = new AudioWorkletNode(audioContext, 'audio-processor', {
-                numberOfInputs: 1,
-                numberOfOutputs: 1,
-                processorOptions: {
-                    bufferSize: BUFFER_SIZE
-                }
-            });
-
-            source.connect(workletNode);
-            workletNode.connect(audioContext.destination);
-            logAudioDebug('Audio worklet setup complete');
-            
-            workletNode.port.onmessage = (event) => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    logAudioDebug('Sending audio data, length:', event.data.length);
-                    sendAudioData(event.data);
-                }
-            };
-
-            // Add error handling for the worklet
-            workletNode.onprocessorerror = (err) => {
-                logAudioDebug('AudioWorklet processing error:', err);
-            };
-        }
-
-        function sendAudioData(audioData) {
-            try {
-                const pcmS16Array = convertFloat32ToS16PCM(audioData);
-                const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-                const frame = Frame.create({
-                    audio: {
-                        audio: Array.from(pcmByteArray),
-                        sampleRate: SAMPLE_RATE,
-                        numChannels: NUM_CHANNELS
+                scriptProcessor.onaudioprocess = (event) => {
+                    if (!ws) {
+                        return;
                     }
-                });
-                const encodedFrame = Frame.encode(frame).finish();
-                logAudioDebug('Sending frame, size:', encodedFrame.length);
-                ws.send(encodedFrame);
-            } catch (error) {
-                logAudioDebug('Error sending audio data:', error);
-            }
+
+                    const audioData = event.inputBuffer.getChannelData(0);
+                    const pcmS16Array = convertFloat32ToS16PCM(audioData);
+                    const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
+                    const frame = Frame.create({
+                        audio: {
+                            audio: Array.from(pcmByteArray),
+                            sampleRate: SAMPLE_RATE,
+                            numChannels: NUM_CHANNELS
+                        }
+                    });
+                    const encodedFrame = new Uint8Array(Frame.encode(frame).finish());
+                    ws.send(encodedFrame);
+                };
+            }).catch((error) => console.error('Error accessing microphone:', error));
         }
 
         function handleWebSocketMessage(event) {
-            logAudioDebug('Received WebSocket message, size:', event.data.byteLength);
+            const arrayBuffer = event.data;
             if (isPlaying) {
-                queueAudioFromProto(event.data);
+                enqueueAudioFromProto(arrayBuffer);
             }
         }
 
-        function queueAudioFromProto(arrayBuffer) {
-            try {
-                const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
-                logAudioDebug('Decoded proto frame:', parsedFrame?.audio ? 'success' : 'failed');
-                
-                if (!parsedFrame?.audio) return;
-
-                const audioVector = Array.from(parsedFrame.audio.audio);
-                const audioArray = new Uint8Array(audioVector);
-                logAudioDebug('Audio data received, size:', audioArray.length);
-
-                audioQueue.push(audioArray.buffer);
-                if (audioQueue.length > MAX_BUFFER_SIZE) {
-                    audioQueue.shift();
-                    logAudioDebug('Queue overflow, dropped oldest frame');
-                }
-
-                if (audioQueue.length >= 2 && !playTime) {
-                    logAudioDebug('Starting playback');
-                    playNextInQueue();
-                }
-            } catch (error) {
-                logAudioDebug('Error processing audio frame:', error);
+        function enqueueAudioFromProto(arrayBuffer) {
+            const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
+            if (!parsedFrame?.audio) {
+                return false;
             }
+
+            // Reset play time if it's been a while we haven't played anything.
+            const diffTime = audioContext.currentTime - lastMessageTime;
+            if ((playTime == 0) || (diffTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
+                playTime = audioContext.currentTime;
+            }
+            lastMessageTime = audioContext.currentTime;
+
+            // We should be able to use parsedFrame.audio.audio.buffer but for
+            // some reason that contains all the bytes from the protobuf message.
+            const audioVector = Array.from(parsedFrame.audio.audio);
+            const audioArray = new Uint8Array(audioVector);
+
+            audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
+                const source = new AudioBufferSourceNode(audioContext);
+                source.buffer = buffer;
+                source.start(playTime);
+                source.connect(audioContext.destination);
+                playTime = playTime + buffer.duration;
+            });
         }
 
-        function playNextInQueue() {
-            if (!audioQueue.length || !isPlaying) return;
-
-            const buffer = audioQueue.shift();
-            audioContext.decodeAudioData(buffer)
-                .then(decodedBuffer => {
-                    const source = audioContext.createBufferSource();
-                    source.buffer = decodedBuffer;
-
-                    if (!playTime || (audioContext.currentTime - lastMessageTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
-                        playTime = audioContext.currentTime;
-                    }
-
-                    source.start(playTime);
-                    source.connect(audioContext.destination);
-                    playTime += decodedBuffer.duration;
-                    lastMessageTime = audioContext.currentTime;
-                    source.onended = playNextInQueue;
-                })
-                .catch(error => {
-                    console.error('Error decoding audio data:', error);
-                });
-        }
-
-        // Utility functions
         function convertFloat32ToS16PCM(float32Array) {
-            const int16Array = new Int16Array(float32Array.length);
+            let int16Array = new Int16Array(float32Array.length);
+
             for (let i = 0; i < float32Array.length; i++) {
-                const s = Math.max(-1, Math.min(1, float32Array[i]));
-                int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                let clampedValue = Math.max(-1, Math.min(1, float32Array[i]));
+                int16Array[i] = clampedValue < 0 ? clampedValue * 32768 : clampedValue * 32767;
             }
             return int16Array;
         }
 
-        function updateAudioStats() {
-            if (!isPlaying) return;
-            
-            audioStats.textContent = `
-                Buffer Size: ${audioQueue.length}/${MAX_BUFFER_SIZE}
-                Latency: ${(audioContext?.baseLatency || 0).toFixed(3)}s
-                Sample Rate: ${SAMPLE_RATE}Hz
-                Current Time: ${audioContext?.currentTime.toFixed(2)}s
-            `;
-        }
-
-        function startAudioStats() {
-            statsInterval = setInterval(updateAudioStats, 1000);
-        }
-
-        // Button handlers
-        async function startAudioBtnHandler() {
+        function startAudioBtnHandler() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                alert('Audio input is not supported in your browser.');
+                alert('getUserMedia is not supported in your browser.');
                 return;
             }
 
-            try {
-                await initializeAudio();
-                startBtn.style.display = 'none';
-                stopBtn.style.display = 'inline-block';
-                stopBtn.disabled = false;
-                isPlaying = true;
+            startBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
 
-                initWebSocket();
-            } catch (error) {
-                console.error('Error initializing audio:', error);
-                progressText.textContent = 'Error initializing audio system';
-            }
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                latencyHint: 'interactive',
+                sampleRate: SAMPLE_RATE
+            });
+
+            isPlaying = true;
+
+            initWebSocket();
         }
 
         function stopAudio(closeWebsocket) {
-            isPlaying = false;
             playTime = 0;
-            audioQueue = [];
+            isPlaying = false;
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
 
-            if (closeWebsocket && ws) {
+            if (ws && closeWebsocket) {
                 ws.close();
                 ws = null;
             }
 
-            if (workletNode) {
-                workletNode.disconnect();
-                workletNode = null;
-            }
-
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
-                scriptProcessor = null;
             }
-
             if (source) {
                 source.disconnect();
-                source = null;
             }
-
-            if (microphoneStream) {
-                microphoneStream.getTracks().forEach(track => track.stop());
-                microphoneStream = null;
-            }
-
-            if (statsInterval) {
-                clearInterval(statsInterval);
-                statsInterval = null;
-            }
-
-            startBtn.style.display = 'inline-block';
-            stopBtn.style.display = 'none';
-            audioStats.textContent = '';
         }
 
         function stopAudioBtnHandler() {
             stopAudio(true);
         }
 
-        // Event listeners
         startBtn.addEventListener('click', startAudioBtnHandler);
         stopBtn.addEventListener('click', stopAudioBtnHandler);
         startBtn.disabled = true;
